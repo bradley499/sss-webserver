@@ -13,6 +13,7 @@
 #include <httplib.h>
 #include <openssl/err.h>
 #include <openssl/ssl.h>
+#include <openssl/x509.h>
 
 #include "mime_registry.hpp"
 
@@ -94,7 +95,12 @@ namespace
         if (SSL_CTX_use_certificate_chain_file(ssl_context.get(), certificate_path.c_str()) != SSL_SUCCESS)
             throw std::runtime_error("Failed to load certificate file: " + certificate_path.string());
         if (SSL_CTX_use_PrivateKey_file(ssl_context.get(), private_key_path.c_str(), SSL_FILETYPE_PEM) != SSL_SUCCESS)
+        {
+            unsigned long const error_code = ERR_peek_last_error();
+            if (ERR_GET_REASON(error_code) == X509_R_KEY_VALUES_MISMATCH)
+                throw std::runtime_error("Private key does not match certificate: " + private_key_path.string());
             throw std::runtime_error("Failed to load private key file: " + private_key_path.string());
+        }
         if (SSL_CTX_check_private_key(ssl_context.get()) != SSL_SUCCESS)
             throw std::runtime_error("Private key does not match certificate: " + private_key_path.string());
 
@@ -105,17 +111,19 @@ namespace
     }
 
     /**
-     * @brief Allocate a server instance based on options.
-     * @param options Network and TLS options.
+     * @brief Allocate a server instance based on certificate paths.
+     * @param certificate_path Path to certificate file.
+     * @param private_key_path Path to private key file.
      * @returns Unique pointer to allocated httplib Server.
      * @throws std::runtime_error If certificate configuration is mismatched.
      */
-    [[nodiscard]] std::unique_ptr<httplib::Server> create_server_instance(sss::webserver::Options const &options)
+    [[nodiscard]] std::unique_ptr<httplib::Server> create_server_instance(std::filesystem::path const &certificate_path,
+                                                                          std::filesystem::path const &private_key_path)
     {
-        if (options.certificate_path.empty() != options.private_key_path.empty())
+        if (certificate_path.empty() != private_key_path.empty())
             throw std::runtime_error("Both certificate_path and private_key_path must be provided for HTTPS");
-        else if (!options.certificate_path.empty() && !options.private_key_path.empty())
-            return create_ssl_server(options.certificate_path, options.private_key_path);
+        else if (!certificate_path.empty() && !private_key_path.empty())
+            return create_ssl_server(certificate_path, private_key_path);
         return std::make_unique<httplib::Server>();
     }
 
@@ -199,22 +207,22 @@ namespace
 
 namespace sss::webserver
 {
-    Server::Server(std::filesystem::path const &root_directory, Options const &options)
-        : m_server(create_server_instance(options)),
+    Server::Server(std::filesystem::path const &root_directory,
+                   int const port,
+                   std::string const &host,
+                   std::filesystem::path const &certificate_path,
+                   std::filesystem::path const &private_key_path)
+        : m_server(create_server_instance(certificate_path, private_key_path)),
           m_worker_thread()
     {
         std::string const root_path = resolve_root_path(root_directory);
-        uint16_t const port = validate_port(options.port);
-        std::string const bind_host = normalize_bind_host(options.host);
+        uint16_t const valid_port = validate_port(port);
+        std::string const bind_host = normalize_bind_host(host);
 
         this->m_server->set_socket_options([](auto const socket_descriptor)
         {
             int const socket_option = ENABLE_SOCKET_OPTION;
-            setsockopt(socket_descriptor,
-                       SOL_SOCKET,
-                       SO_REUSEADDR,
-                       reinterpret_cast<void const *>(&socket_option),
-                       sizeof(socket_option));
+            setsockopt(socket_descriptor, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<void const *>(&socket_option), sizeof(socket_option));
         });
 
         this->m_server->set_read_timeout(READ_TIMEOUT_SECONDS, TIMEOUT_MICROSECONDS);
@@ -266,8 +274,8 @@ namespace sss::webserver
             }
         });
 
-        if (!this->m_server->bind_to_port(bind_host, port))
-            throw std::runtime_error("Failed to bind socket on " + bind_host + ":" + std::to_string(port));
+        if (!this->m_server->bind_to_port(bind_host, valid_port))
+            throw std::runtime_error("Failed to bind socket on " + bind_host + ":" + std::to_string(valid_port));
 
         this->m_worker_thread = std::thread([this]()
         {

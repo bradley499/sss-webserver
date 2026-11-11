@@ -22,15 +22,12 @@ sss-webserver -c cert.pem -k key.pem /path/to/directory
 ```cpp
 #include <sss/webserver.hpp>
 
-// HTTP
-sss::webserver::Options options;
-options.port = 8080;
-sss::webserver::Server server("/path/to/directory", options);
+// HTTP (default port 8080 on 127.0.0.1)
+sss::webserver::Server server("/path/to/directory");
+
+// HTTP with custom port and host
+sss::webserver::Server server("/path/to/directory", 8080, "127.0.0.1");
 
 // HTTPS
-sss::webserver::Options https_options;
-https_options.port = 8443;
-https_options.certificate_path = "cert.pem";
-https_options.private_key_path = "key.pem";
-sss::webserver::Server secure_server("/path/to/directory", https_options);
+sss::webserver::Server secure_server("/path/to/directory", 8443, "127.0.0.1", "cert.pem", "key.pem");
 ```

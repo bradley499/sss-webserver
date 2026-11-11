@@ -15,9 +15,24 @@ namespace
     bool show_help = false;
 
     /**
-     * @brief Server network and security configuration options.
+     * @brief Network port number.
      */
-    sss::webserver::Options server_options = {};
+    int server_port = 8080;
+
+    /**
+     * @brief Host IP address or hostname.
+     */
+    std::string server_host = "127.0.0.1";
+
+    /**
+     * @brief Path to SSL certificate file.
+     */
+    std::filesystem::path certificate_path = {};
+
+    /**
+     * @brief Path to SSL private key file.
+     */
+    std::filesystem::path private_key_path = {};
 
     /**
      * @brief Filesystem path of the directory to serve.
@@ -75,7 +90,7 @@ namespace
                             std::cerr << "sss-webserver: Option '--host' requires an argument\n";
                             exit(EXIT_FAILURE);
                         }
-                        server_options.host = argument_values[argument_index];
+                        server_host = argument_values[argument_index];
                     }
                     else if (argument == "--port")
                     {
@@ -86,7 +101,7 @@ namespace
                         }
                         try
                         {
-                            server_options.port = std::stoi(argument_values[argument_index]);
+                            server_port = std::stoi(argument_values[argument_index]);
                         }
                         catch (std::exception const &)
                         {
@@ -101,7 +116,7 @@ namespace
                             std::cerr << "sss-webserver: Option '--cert' requires an argument\n";
                             exit(EXIT_FAILURE);
                         }
-                        server_options.certificate_path = argument_values[argument_index];
+                        certificate_path = argument_values[argument_index];
                     }
                     else if (argument == "--key")
                     {
@@ -110,7 +125,7 @@ namespace
                             std::cerr << "sss-webserver: Option '--key' requires an argument\n";
                             exit(EXIT_FAILURE);
                         }
-                        server_options.private_key_path = argument_values[argument_index];
+                        private_key_path = argument_values[argument_index];
                     }
                     else
                     {
@@ -129,7 +144,9 @@ namespace
                             show_help = true;
                             break;
                         case 'v':
-                            std::cout << "sss-webserver: v" << SSS_WEBSERVER_VERSION_MAJOR << "." << SSS_WEBSERVER_VERSION_MINOR << "." << SSS_WEBSERVER_VERSION_PATCH << "\n";
+                            std::cout << "sss-webserver: v" << SSS_WEBSERVER_VERSION_MAJOR << "."
+                                      << SSS_WEBSERVER_VERSION_MINOR << "."
+                                      << SSS_WEBSERVER_VERSION_PATCH << "\n";
                             exit(EXIT_SUCCESS);
                         case 'H':
                         case 'p':
@@ -151,12 +168,12 @@ namespace
                             }
 
                             if (character == 'H')
-                                server_options.host = value;
+                                server_host = value;
                             else if (character == 'p')
                             {
                                 try
                                 {
-                                    server_options.port = std::stoi(value);
+                                    server_port = std::stoi(value);
                                 }
                                 catch (std::exception const &)
                                 {
@@ -165,9 +182,9 @@ namespace
                                 }
                             }
                             else if (character == 'c')
-                                server_options.certificate_path = value;
+                                certificate_path = value;
                             else if (character == 'k')
-                                server_options.private_key_path = value;
+                                private_key_path = value;
                             break;
                         }
                         default:
@@ -197,7 +214,7 @@ namespace
             exit(EXIT_FAILURE);
         }
 
-        if (server_options.certificate_path.empty() != server_options.private_key_path.empty())
+        if (certificate_path.empty() != private_key_path.empty())
         {
             std::cerr << "sss-webserver: Both -c/--cert and -k/--key must be provided for HTTPS\n";
             exit(EXIT_FAILURE);
@@ -223,14 +240,13 @@ int main(int const argument_count, char const *argument_values[])
             return EXIT_FAILURE;
         }
 
-        sss::webserver::Server const server(root_directory, server_options);
+        sss::webserver::Server const server(root_directory, server_port, server_host, certificate_path, private_key_path);
 
-        bool const is_https = !server_options.certificate_path.empty() &&
-                              !server_options.private_key_path.empty();
+        bool const is_https = !certificate_path.empty() && !private_key_path.empty();
         if (is_https)
-            std::cout << "sss-webserver: Serving '" << root_directory.string() << "' over HTTPS on https://" << server_options.host << ":" << server_options.port << "\n";
+            std::cout << "sss-webserver: Serving '" << root_directory.string() << "' over HTTPS on https://" << server_host << ":" << server_port << "\n";
         else
-            std::cout << "sss-webserver: Serving '" << root_directory.string() << "' over HTTP on http://" << server_options.host << ":" << server_options.port << "\n";
+            std::cout << "sss-webserver: Serving '" << root_directory.string() << "' over HTTP on http://" << server_host << ":" << server_port << "\n";
 
         int caught_signal = 0;
         sigwait(&signals, &caught_signal);
