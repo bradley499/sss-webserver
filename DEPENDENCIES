@@ -1,0 +1,6 @@
+build-essential
+cmake
+libcpp-httplib-dev
+libssl-dev
+libgtest-dev
+media-types

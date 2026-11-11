@@ -1,0 +1,42 @@
+name: Verify version has incremented
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  version_check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify version has incremented
+        run: |
+          NEW=$(sed -zEn 's/.*project\([^)]*VERSION\s+([0-9.]+).*/\1/p' CMakeLists.txt)
+
+          if ! git show origin/main:CMakeLists.txt >/dev/null 2>&1; then
+            echo "No previous CMakeLists.txt on origin/main. Initial version: v$NEW"
+            exit 0
+          fi
+
+          OLD=$(git show origin/main:CMakeLists.txt | sed -zEn 's/.*project\([^)]*VERSION\s+([0-9.]+).*/\1/p')
+
+          if [ -z "$OLD" ]; then
+            echo "No previous version found in origin/main:CMakeLists.txt. Initial version: v$NEW"
+            exit 0
+          fi
+
+          echo "Comparing $NEW to $OLD..."
+          if [ "$NEW" = "$OLD" ]; then
+            echo "::error::Version has not changed from v$NEW. Please increment CMakeLists.txt."
+            exit 1
+          fi
+
+          LATEST=$(printf "%s\n%s" "$OLD" "$NEW" | sort -V | tail -n1)
+          if [ "$LATEST" = "$NEW" ]; then
+            echo "v$NEW is greater than v$OLD"
+          else
+            echo "::error::Version regression! v$NEW is lower than v$OLD."
+            exit 1
+          fi
