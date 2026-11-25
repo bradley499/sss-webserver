@@ -45,6 +45,31 @@ namespace
     constexpr int TLS_ASSETS_TEST_PORT = 59125;
 
     /**
+     * @brief Dedicated port for address conflict binding test.
+     */
+    constexpr int CONFLICT_TEST_PORT = 59126;
+
+    /**
+     * @brief Dedicated port for HTTP method restriction tests.
+     */
+    constexpr int HTTP_METHODS_TEST_PORT = 59127;
+
+    /**
+     * @brief Dedicated port for path traversal restriction tests.
+     */
+    constexpr int PATH_TRAVERSAL_TEST_PORT = 59128;
+
+    /**
+     * @brief Dedicated port for dotfile access restriction tests.
+     */
+    constexpr int DOTFILE_ACCESS_TEST_PORT = 59129;
+
+    /**
+     * @brief Dedicated port for null byte injection restriction tests.
+     */
+    constexpr int NULL_BYTE_INJECTION_TEST_PORT = 59130;
+
+    /**
      * @brief Custom deleter for OpenSSL EVP_PKEY structures.
      */
     struct KeyDeleter
@@ -141,8 +166,7 @@ namespace
          * @param certificate_path Destination filesystem path for the certificate PEM file.
          * @param private_key_path Destination filesystem path for the private key PEM file.
          */
-        void generate_self_signed_certificate(std::filesystem::path const &certificate_path,
-                                              std::filesystem::path const &private_key_path)
+        void generate_self_signed_certificate(std::filesystem::path const &certificate_path, std::filesystem::path const &private_key_path)
         {
             constexpr int rsa_key_length = 2048;
             constexpr long certificate_serial_number = 1L;
@@ -166,13 +190,7 @@ namespace
             X509_set_pubkey(certificate.get(), private_key.get());
 
             X509_NAME *name = X509_get_subject_name(certificate.get());
-            X509_NAME_add_entry_by_txt(name,
-                                       "CN",
-                                       MBSTRING_ASC,
-                                       reinterpret_cast<unsigned char const *>("localhost"),
-                                       null_terminated_length,
-                                       append_entry,
-                                       no_entry_flags);
+            X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC, reinterpret_cast<unsigned char const *>("localhost"), null_terminated_length, append_entry, no_entry_flags);
             X509_set_issuer_name(certificate.get(), name);
 
             if (X509_sign(certificate.get(), private_key.get(), EVP_sha256()) == 0)
@@ -229,6 +247,21 @@ TEST(ServerConfigurationTest, RejectsInvalidInputs)
     }
 
     EXPECT_THROW(sss::webserver::Server("/tmp", INVALID_PORT), std::invalid_argument);
+}
+
+TEST(ServerConfigurationTest, RejectsPortAlreadyInUse)
+{
+    sss::webserver::Server const primary_server("/tmp", CONFLICT_TEST_PORT, "127.0.0.1");
+
+    try
+    {
+        sss::webserver::Server const secondary_server("/tmp", CONFLICT_TEST_PORT, "127.0.0.1");
+        FAIL() << "Expected std::runtime_error when port is already in use";
+    }
+    catch (std::runtime_error const &exception)
+    {
+        EXPECT_NE(std::string(exception.what()).find("Failed to bind socket on 127.0.0.1:" + std::to_string(CONFLICT_TEST_PORT)), std::string::npos);
+    }
 }
 
 TEST_F(TemporaryDirectoryFixture, RejectsInvalidTlsConfiguration)
@@ -350,6 +383,7 @@ TEST_F(TemporaryDirectoryFixture, ServesStaticAssets)
     EXPECT_EQ(root_response->status, httplib::StatusCode::OK_200);
     EXPECT_EQ(root_response->get_header_value("Server"), "SSS");
     EXPECT_EQ(root_response->get_header_value("Content-Type"), "text/html");
+    EXPECT_FALSE(root_response->has_header("Strict-Transport-Security"));
     EXPECT_EQ(root_response->body, "<h1>Hello World</h1>");
 
     auto const asset_response = client.Get("/data.json");
@@ -393,28 +427,147 @@ TEST_F(TemporaryDirectoryFixture, ServesStaticAssetsOverHttps)
     EXPECT_EQ(response->get_header_value("Content-Type"), "text/html");
     EXPECT_EQ(response->get_header_value("X-Content-Type-Options"), "nosniff");
     EXPECT_EQ(response->get_header_value("X-Frame-Options"), "SAMEORIGIN");
+    EXPECT_EQ(response->get_header_value("Strict-Transport-Security"), "max-age=3600; includeSubDomains");
     EXPECT_EQ(response->body, "<h1>Secure SSS</h1>");
 }
 
-TEST_F(TemporaryDirectoryFixture, EnforcesSecurityRestrictions)
+TEST_F(TemporaryDirectoryFixture, EnforcesSecurityHeaders)
 {
     this->write_file("index.html", "safe content");
-    this->write_file(".env", "SECRET=12345");
 
     sss::webserver::Server const server(this->m_temporary_directory, SECURITY_RESTRICTIONS_TEST_PORT);
 
     httplib::Client client("127.0.0.1", SECURITY_RESTRICTIONS_TEST_PORT);
 
+    auto const normal_response = client.Get("/index.html");
+    ASSERT_TRUE(normal_response);
+    EXPECT_EQ(normal_response->status, httplib::StatusCode::OK_200);
+    EXPECT_EQ(normal_response->get_header_value("Server"), "SSS");
+    EXPECT_EQ(normal_response->get_header_value("X-Content-Type-Options"), "nosniff");
+    EXPECT_EQ(normal_response->get_header_value("X-Frame-Options"), "SAMEORIGIN");
+    EXPECT_FALSE(normal_response->has_header("Strict-Transport-Security"));
+    EXPECT_EQ(normal_response->body, "safe content");
+
+    auto const head_response = client.Head("/index.html");
+    ASSERT_TRUE(head_response);
+    EXPECT_EQ(head_response->status, httplib::StatusCode::OK_200);
+    EXPECT_EQ(head_response->get_header_value("Server"), "SSS");
+    EXPECT_EQ(head_response->get_header_value("X-Content-Type-Options"), "nosniff");
+    EXPECT_EQ(head_response->get_header_value("X-Frame-Options"), "SAMEORIGIN");
+    EXPECT_FALSE(head_response->has_header("Strict-Transport-Security"));
+    EXPECT_TRUE(head_response->body.empty());
+}
+
+TEST_F(TemporaryDirectoryFixture, RejectsDisallowedHttpMethods)
+{
+    this->write_file("index.html", "safe content");
+
+    sss::webserver::Server const server(this->m_temporary_directory, HTTP_METHODS_TEST_PORT);
+
+    httplib::Client client("127.0.0.1", HTTP_METHODS_TEST_PORT);
+
+    auto const post_response = client.Post("/index.html", "payload", "text/plain");
+    ASSERT_TRUE(post_response);
+    EXPECT_EQ(post_response->status, httplib::StatusCode::MethodNotAllowed_405);
+    EXPECT_EQ(post_response->get_header_value("Allow"), "GET, HEAD");
+
+    auto const put_response = client.Put("/index.html", "payload", "text/plain");
+    ASSERT_TRUE(put_response);
+    EXPECT_EQ(put_response->status, httplib::StatusCode::MethodNotAllowed_405);
+    EXPECT_EQ(put_response->get_header_value("Allow"), "GET, HEAD");
+
+    auto const delete_response = client.Delete("/index.html");
+    ASSERT_TRUE(delete_response);
+    EXPECT_EQ(delete_response->status, httplib::StatusCode::MethodNotAllowed_405);
+    EXPECT_EQ(delete_response->get_header_value("Allow"), "GET, HEAD");
+
+    auto const patch_response = client.Patch("/index.html", "payload", "text/plain");
+    ASSERT_TRUE(patch_response);
+    EXPECT_EQ(patch_response->status, httplib::StatusCode::MethodNotAllowed_405);
+    EXPECT_EQ(patch_response->get_header_value("Allow"), "GET, HEAD");
+
+    auto const options_response = client.Options("/index.html");
+    ASSERT_TRUE(options_response);
+    EXPECT_EQ(options_response->status, httplib::StatusCode::MethodNotAllowed_405);
+    EXPECT_EQ(options_response->get_header_value("Allow"), "GET, HEAD");
+}
+
+TEST_F(TemporaryDirectoryFixture, RejectsPathTraversal)
+{
+    this->write_file("index.html", "safe content");
+
+    sss::webserver::Server const server(this->m_temporary_directory, PATH_TRAVERSAL_TEST_PORT);
+
+    httplib::Client client("127.0.0.1", PATH_TRAVERSAL_TEST_PORT);
+
     auto const traversal_response = client.Get("/../outside.txt");
     ASSERT_TRUE(traversal_response);
     EXPECT_EQ(traversal_response->status, httplib::StatusCode::Forbidden_403);
+
+    auto const slash_traversal_response = client.Get("/..");
+    ASSERT_TRUE(slash_traversal_response);
+    EXPECT_EQ(slash_traversal_response->status, httplib::StatusCode::Forbidden_403);
+
+    auto const encoded_traversal_response = client.Get("/%2e%2e/outside.txt");
+    ASSERT_TRUE(encoded_traversal_response);
+    EXPECT_EQ(encoded_traversal_response->status, httplib::StatusCode::Forbidden_403);
+
+    auto const uppercase_encoded_traversal_response = client.Get("/%2E%2E");
+    ASSERT_TRUE(uppercase_encoded_traversal_response);
+    EXPECT_EQ(uppercase_encoded_traversal_response->status, httplib::StatusCode::Forbidden_403);
+
+    auto const mixed_encoded_traversal_response = client.Get("/.%2e/outside.txt");
+    ASSERT_TRUE(mixed_encoded_traversal_response);
+    EXPECT_EQ(mixed_encoded_traversal_response->status, httplib::StatusCode::Forbidden_403);
+
+    auto const nested_traversal_response = client.Get("/sub/../../outside.txt");
+    ASSERT_TRUE(nested_traversal_response);
+    EXPECT_EQ(nested_traversal_response->status, httplib::StatusCode::Forbidden_403);
+
+    auto const backslash_traversal_response = client.Get("/..\\outside.txt");
+    ASSERT_TRUE(backslash_traversal_response);
+    EXPECT_EQ(backslash_traversal_response->status, httplib::StatusCode::Forbidden_403);
+
+    auto const encoded_backslash_traversal_response = client.Get("/..%5coutside.txt");
+    ASSERT_TRUE(encoded_backslash_traversal_response);
+    EXPECT_EQ(encoded_backslash_traversal_response->status, httplib::StatusCode::Forbidden_403);
+}
+
+TEST_F(TemporaryDirectoryFixture, RejectsDotfileAccess)
+{
+    this->write_file(".env", "SECRET=12345");
+    this->write_file("assets/.hidden", "NESTED_SECRET=67890");
+
+    sss::webserver::Server const server(this->m_temporary_directory, DOTFILE_ACCESS_TEST_PORT);
+
+    httplib::Client client("127.0.0.1", DOTFILE_ACCESS_TEST_PORT);
 
     auto const dotfile_response = client.Get("/.env");
     ASSERT_TRUE(dotfile_response);
     EXPECT_EQ(dotfile_response->status, httplib::StatusCode::Forbidden_403);
 
-    auto const normal_response = client.Get("/index.html");
-    ASSERT_TRUE(normal_response);
-    EXPECT_EQ(normal_response->get_header_value("X-Content-Type-Options"), "nosniff");
-    EXPECT_EQ(normal_response->get_header_value("X-Frame-Options"), "SAMEORIGIN");
+    auto const encoded_dotfile_response = client.Get("/%2eenv");
+    ASSERT_TRUE(encoded_dotfile_response);
+    EXPECT_EQ(encoded_dotfile_response->status, httplib::StatusCode::Forbidden_403);
+
+    auto const nested_dotfile_response = client.Get("/assets/.hidden");
+    ASSERT_TRUE(nested_dotfile_response);
+    EXPECT_EQ(nested_dotfile_response->status, httplib::StatusCode::Forbidden_403);
+
+    auto const encoded_nested_dotfile_response = client.Get("/assets/%2egit/config");
+    ASSERT_TRUE(encoded_nested_dotfile_response);
+    EXPECT_EQ(encoded_nested_dotfile_response->status, httplib::StatusCode::Forbidden_403);
+}
+
+TEST_F(TemporaryDirectoryFixture, RejectsNullByteInjection)
+{
+    this->write_file("index.html", "safe content");
+
+    sss::webserver::Server const server(this->m_temporary_directory, NULL_BYTE_INJECTION_TEST_PORT);
+
+    httplib::Client client("127.0.0.1", NULL_BYTE_INJECTION_TEST_PORT);
+
+    auto const null_byte_in_path_response = client.Get("/index.html%00.txt");
+    ASSERT_TRUE(null_byte_in_path_response);
+    EXPECT_EQ(null_byte_in_path_response->status, httplib::StatusCode::BadRequest_400);
 }

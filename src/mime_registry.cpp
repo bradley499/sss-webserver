@@ -11,19 +11,13 @@ namespace sss::webserver
     namespace
     {
         /**
-         * @brief Convert an input string view to lowercase ASCII characters.
-         * @param text Input text sequence.
-         * @returns New string containing lowercase characters.
+         * @brief Convert an input string to lowercase ASCII characters in place.
+         * @param text Input and output text sequence to transform.
          */
-        [[nodiscard]] std::string to_lower(std::string_view const text)
+        void transform_to_lower(std::string &text) noexcept
         {
-            std::string result;
-            result.reserve(text.size());
-            std::transform(text.begin(), text.end(), std::back_inserter(result), [](unsigned char const character)
-            {
-                return static_cast<char>(std::tolower(character));
-            });
-            return result;
+            for (char &character : text)
+                character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
         }
 
         /**
@@ -51,13 +45,16 @@ namespace sss::webserver
                 if (!(line_stream >> mime_type))
                     continue;
 
-                mime_type = to_lower(mime_type);
+                transform_to_lower(mime_type);
                 std::string extension;
                 while (line_stream >> extension)
                 {
-                    extension = to_lower(extension);
-                    while (!extension.empty() && extension.front() == '.')
-                        extension.erase(0, 1);
+                    transform_to_lower(extension);
+                    size_t dot_count = 0;
+                    while (dot_count < extension.size() && extension[dot_count] == '.')
+                        ++dot_count;
+                    if (dot_count > 0)
+                        extension.erase(0, dot_count);
                     if (!extension.empty())
                         mime_map.emplace(extension, mime_type);
                 }
@@ -66,14 +63,11 @@ namespace sss::webserver
             return mime_map;
         }
 
-        /**
-         * @brief Global system MIME registry loaded at program initialization.
-         */
-        std::unordered_map<std::string, std::string> const SYSTEM_MIME_TYPES = load_mime_file("/etc/mime.types");
     } // namespace
 
     std::unordered_map<std::string, std::string> const &get_system_mime_types()
     {
-        return SYSTEM_MIME_TYPES;
+        static std::unordered_map<std::string, std::string> const system_mime_types = load_mime_file("/etc/mime.types");
+        return system_mime_types;
     }
 } // namespace sss::webserver
