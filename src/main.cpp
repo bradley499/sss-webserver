@@ -78,9 +78,7 @@ namespace
                         show_help = true;
                     else if (argument == "--version")
                     {
-                        std::cout << "sss-webserver: v" << SSS_WEBSERVER_VERSION_MAJOR << "."
-                                  << SSS_WEBSERVER_VERSION_MINOR << "."
-                                  << SSS_WEBSERVER_VERSION_PATCH << "\n";
+                        std::cout << "sss-webserver: v" << SSS_WEBSERVER_VERSION_MAJOR << "." << SSS_WEBSERVER_VERSION_MINOR << "." << SSS_WEBSERVER_VERSION_PATCH << "\n";
                         exit(EXIT_SUCCESS);
                     }
                     else if (argument == "--host")
@@ -140,56 +138,54 @@ namespace
                         char const character = argument[character_index];
                         switch (character)
                         {
-                        case 'h':
-                            show_help = true;
-                            break;
-                        case 'v':
-                            std::cout << "sss-webserver: v" << SSS_WEBSERVER_VERSION_MAJOR << "."
-                                      << SSS_WEBSERVER_VERSION_MINOR << "."
-                                      << SSS_WEBSERVER_VERSION_PATCH << "\n";
-                            exit(EXIT_SUCCESS);
-                        case 'H':
-                        case 'p':
-                        case 'c':
-                        case 'k':
-                        {
-                            std::string value;
-                            if (character_index + 1 < argument.length())
+                            case 'h':
+                                show_help = true;
+                                break;
+                            case 'v':
+                                std::cout << "sss-webserver: v" << SSS_WEBSERVER_VERSION_MAJOR << "." << SSS_WEBSERVER_VERSION_MINOR << "." << SSS_WEBSERVER_VERSION_PATCH << "\n";
+                                exit(EXIT_SUCCESS);
+                            case 'H':
+                            case 'p':
+                            case 'c':
+                            case 'k':
                             {
-                                value = argument.substr(character_index + 1);
-                                character_index = argument.length();
-                            }
-                            else if (++argument_index < argument_count)
-                                value = argument_values[argument_index];
-                            else
-                            {
-                                std::cerr << "sss-webserver: Option '-" << character << "' requires an argument\n";
-                                exit(EXIT_FAILURE);
-                            }
-
-                            if (character == 'H')
-                                server_host = value;
-                            else if (character == 'p')
-                            {
-                                try
+                                std::string value;
+                                if (character_index + 1 < argument.length())
                                 {
-                                    server_port = std::stoi(value);
+                                    value = argument.substr(character_index + 1);
+                                    character_index = argument.length();
                                 }
-                                catch (std::exception const &)
+                                else if (++argument_index < argument_count)
+                                    value = argument_values[argument_index];
+                                else
                                 {
-                                    std::cerr << "sss-webserver: Invalid port -- '" << value << "'\n";
+                                    std::cerr << "sss-webserver: Option '-" << character << "' requires an argument\n";
                                     exit(EXIT_FAILURE);
                                 }
+
+                                if (character == 'H')
+                                    server_host = value;
+                                else if (character == 'p')
+                                {
+                                    try
+                                    {
+                                        server_port = std::stoi(value);
+                                    }
+                                    catch (std::exception const &)
+                                    {
+                                        std::cerr << "sss-webserver: Invalid port -- '" << value << "'\n";
+                                        exit(EXIT_FAILURE);
+                                    }
+                                }
+                                else if (character == 'c')
+                                    certificate_path = value;
+                                else if (character == 'k')
+                                    private_key_path = value;
+                                break;
                             }
-                            else if (character == 'c')
-                                certificate_path = value;
-                            else if (character == 'k')
-                                private_key_path = value;
-                            break;
-                        }
-                        default:
-                            std::cerr << "sss-webserver: Invalid option -- '" << character << "'\n";
-                            exit(EXIT_FAILURE);
+                            default:
+                                std::cerr << "sss-webserver: Invalid option -- '" << character << "'\n";
+                                exit(EXIT_FAILURE);
                         }
                     }
                 }

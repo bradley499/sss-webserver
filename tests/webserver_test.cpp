@@ -141,8 +141,7 @@ namespace
          * @param certificate_path Destination filesystem path for the certificate PEM file.
          * @param private_key_path Destination filesystem path for the private key PEM file.
          */
-        void generate_self_signed_certificate(std::filesystem::path const &certificate_path,
-                                              std::filesystem::path const &private_key_path)
+        void generate_self_signed_certificate(std::filesystem::path const &certificate_path, std::filesystem::path const &private_key_path)
         {
             constexpr int rsa_key_length = 2048;
             constexpr long certificate_serial_number = 1L;
@@ -166,13 +165,7 @@ namespace
             X509_set_pubkey(certificate.get(), private_key.get());
 
             X509_NAME *name = X509_get_subject_name(certificate.get());
-            X509_NAME_add_entry_by_txt(name,
-                                       "CN",
-                                       MBSTRING_ASC,
-                                       reinterpret_cast<unsigned char const *>("localhost"),
-                                       null_terminated_length,
-                                       append_entry,
-                                       no_entry_flags);
+            X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC, reinterpret_cast<unsigned char const *>("localhost"), null_terminated_length, append_entry, no_entry_flags);
             X509_set_issuer_name(certificate.get(), name);
 
             if (X509_sign(certificate.get(), private_key.get(), EVP_sha256()) == 0)
@@ -350,6 +343,7 @@ TEST_F(TemporaryDirectoryFixture, ServesStaticAssets)
     EXPECT_EQ(root_response->status, httplib::StatusCode::OK_200);
     EXPECT_EQ(root_response->get_header_value("Server"), "SSS");
     EXPECT_EQ(root_response->get_header_value("Content-Type"), "text/html");
+    EXPECT_FALSE(root_response->has_header("Strict-Transport-Security"));
     EXPECT_EQ(root_response->body, "<h1>Hello World</h1>");
 
     auto const asset_response = client.Get("/data.json");
@@ -393,6 +387,7 @@ TEST_F(TemporaryDirectoryFixture, ServesStaticAssetsOverHttps)
     EXPECT_EQ(response->get_header_value("Content-Type"), "text/html");
     EXPECT_EQ(response->get_header_value("X-Content-Type-Options"), "nosniff");
     EXPECT_EQ(response->get_header_value("X-Frame-Options"), "SAMEORIGIN");
+    EXPECT_EQ(response->get_header_value("Strict-Transport-Security"), "max-age=3600; includeSubDomains");
     EXPECT_EQ(response->body, "<h1>Secure SSS</h1>");
 }
 
@@ -409,12 +404,34 @@ TEST_F(TemporaryDirectoryFixture, EnforcesSecurityRestrictions)
     ASSERT_TRUE(traversal_response);
     EXPECT_EQ(traversal_response->status, httplib::StatusCode::Forbidden_403);
 
+    auto const slash_traversal_response = client.Get("/..");
+    ASSERT_TRUE(slash_traversal_response);
+    EXPECT_EQ(slash_traversal_response->status, httplib::StatusCode::Forbidden_403);
+
+    auto const encoded_traversal_response = client.Get("/%2e%2e/outside.txt");
+    ASSERT_TRUE(encoded_traversal_response);
+    EXPECT_EQ(encoded_traversal_response->status, httplib::StatusCode::Forbidden_403);
+
+    auto const uppercase_encoded_traversal_response = client.Get("/%2E%2E");
+    ASSERT_TRUE(uppercase_encoded_traversal_response);
+    EXPECT_EQ(uppercase_encoded_traversal_response->status, httplib::StatusCode::Forbidden_403);
+
     auto const dotfile_response = client.Get("/.env");
     ASSERT_TRUE(dotfile_response);
     EXPECT_EQ(dotfile_response->status, httplib::StatusCode::Forbidden_403);
+
+    auto const encoded_dotfile_response = client.Get("/%2eenv");
+    ASSERT_TRUE(encoded_dotfile_response);
+    EXPECT_EQ(encoded_dotfile_response->status, httplib::StatusCode::Forbidden_403);
 
     auto const normal_response = client.Get("/index.html");
     ASSERT_TRUE(normal_response);
     EXPECT_EQ(normal_response->get_header_value("X-Content-Type-Options"), "nosniff");
     EXPECT_EQ(normal_response->get_header_value("X-Frame-Options"), "SAMEORIGIN");
+    EXPECT_FALSE(normal_response->has_header("Strict-Transport-Security"));
+
+    auto const post_response = client.Post("/index.html", "payload", "text/plain");
+    ASSERT_TRUE(post_response);
+    EXPECT_EQ(post_response->status, httplib::StatusCode::MethodNotAllowed_405);
+    EXPECT_EQ(post_response->get_header_value("Allow"), "GET, HEAD");
 }

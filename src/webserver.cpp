@@ -4,6 +4,7 @@
 
 #include "sss/webserver.hpp"
 
+#include <algorithm>
 #include <filesystem>
 #include <memory>
 #include <stdexcept>
@@ -55,76 +56,45 @@ namespace
     constexpr time_t TIMEOUT_MICROSECONDS = 0;
 
     /**
-     * @brief Custom deleter for OpenSSL SSL_CTX pointers.
+     * @brief Maximum number of worker threads allocated for the thread pool task queue.
      */
-    struct SslContextDeleter
-    {
-        /**
-         * @brief Free an allocated SSL_CTX structure.
-         * @param ssl_context Pointer to SSL_CTX structure.
-         */
-        void operator()(SSL_CTX *ssl_context) const noexcept
-        {
-            if (ssl_context != nullptr)
-                SSL_CTX_free(ssl_context);
-        }
-    };
+    constexpr size_t MAXIMUM_WORKER_THREADS = 8;
 
     /**
-     * @brief Validate SSL files and create an httplib SSLServer instance.
-     * @param certificate_path Path to certificate file in PEM format.
-     * @param private_key_path Path to private key file in PEM format.
-     * @returns Unique pointer to configured httplib Server.
-     * @throws std::runtime_error If certificate verification fails.
+     * @brief Check whether a request path attempts path traversal through parent directories.
+     * @param path_string Input path string to evaluate.
+     * @returns True if path traversal sequence exists.
      */
-    [[nodiscard]] std::unique_ptr<httplib::Server> create_ssl_server(std::filesystem::path const &certificate_path,
-                                                                    std::filesystem::path const &private_key_path)
+    [[nodiscard]] bool contains_path_traversal(std::string const &path_string)
     {
-        if (!std::filesystem::exists(certificate_path))
-            throw std::runtime_error("Certificate file does not exist: " + certificate_path.string());
-        if (!std::filesystem::is_regular_file(certificate_path))
-            throw std::runtime_error("Certificate path is not a regular file: " + certificate_path.string());
-        if (!std::filesystem::exists(private_key_path))
-            throw std::runtime_error("Private key file does not exist: " + private_key_path.string());
-        if (!std::filesystem::is_regular_file(private_key_path))
-            throw std::runtime_error("Private key path is not a regular file: " + private_key_path.string());
-
-        std::unique_ptr<SSL_CTX, SslContextDeleter> const ssl_context(SSL_CTX_new(TLS_server_method()));
-        if (!ssl_context)
-            throw std::runtime_error("Failed to allocate SSL context");
-        if (SSL_CTX_use_certificate_chain_file(ssl_context.get(), certificate_path.c_str()) != SSL_SUCCESS)
-            throw std::runtime_error("Failed to load certificate file: " + certificate_path.string());
-        if (SSL_CTX_use_PrivateKey_file(ssl_context.get(), private_key_path.c_str(), SSL_FILETYPE_PEM) != SSL_SUCCESS)
-        {
-            unsigned long const error_code = ERR_peek_last_error();
-            if (ERR_GET_REASON(error_code) == X509_R_KEY_VALUES_MISMATCH)
-                throw std::runtime_error("Private key does not match certificate: " + private_key_path.string());
-            throw std::runtime_error("Failed to load private key file: " + private_key_path.string());
-        }
-        if (SSL_CTX_check_private_key(ssl_context.get()) != SSL_SUCCESS)
-            throw std::runtime_error("Private key does not match certificate: " + private_key_path.string());
-
-        auto ssl_server = std::make_unique<httplib::SSLServer>(certificate_path.c_str(), private_key_path.c_str());
-        if (!ssl_server->is_valid())
-            throw std::runtime_error("SSL server initialization failed");
-        return ssl_server;
+        std::string normalized_path = httplib::detail::decode_url(path_string, false);
+        std::replace(normalized_path.begin(), normalized_path.end(), '\\', '/');
+        std::filesystem::path const filesystem_path(normalized_path);
+        for (auto const &element : filesystem_path)
+            if (element.string() == "..")
+                return true;
+        if (normalized_path == ".." || normalized_path.rfind("../", 0) == 0 || normalized_path.find("/../") != std::string::npos || (normalized_path.length() >= 3 && normalized_path.rfind("/..") == normalized_path.length() - 3))
+            return true;
+        return false;
     }
 
     /**
-     * @brief Allocate a server instance based on certificate paths.
-     * @param certificate_path Path to certificate file.
-     * @param private_key_path Path to private key file.
-     * @returns Unique pointer to allocated httplib Server.
-     * @throws std::runtime_error If certificate configuration is mismatched.
+     * @brief Check if any path segment begins with a dot character.
+     * @param path_string Input path string to evaluate.
+     * @returns True if any segment starts with a dot.
      */
-    [[nodiscard]] std::unique_ptr<httplib::Server> create_server_instance(std::filesystem::path const &certificate_path,
-                                                                          std::filesystem::path const &private_key_path)
+    [[nodiscard]] bool contains_dotfile_segment(std::string const &path_string)
     {
-        if (certificate_path.empty() != private_key_path.empty())
-            throw std::runtime_error("Both certificate_path and private_key_path must be provided for HTTPS");
-        else if (!certificate_path.empty() && !private_key_path.empty())
-            return create_ssl_server(certificate_path, private_key_path);
-        return std::make_unique<httplib::Server>();
+        std::string normalized_path = httplib::detail::decode_url(path_string, false);
+        std::replace(normalized_path.begin(), normalized_path.end(), '\\', '/');
+        std::filesystem::path const filesystem_path(normalized_path);
+        for (auto const &element : filesystem_path)
+        {
+            auto const element_string = element.string();
+            if (!element_string.empty() && element_string != "/" && element_string != "." && element_string != ".." && element_string.front() == '.')
+                return true;
+        }
+        return false;
     }
 
     /**
@@ -135,22 +105,6 @@ namespace
     [[nodiscard]] bool contains_null_byte(httplib::Request const &request)
     {
         return (request.path.find('\0') != std::string::npos || request.target.find('\0') != std::string::npos || request.target.find("%00") != std::string::npos || request.path.find("%00") != std::string::npos);
-    }
-
-    /**
-     * @brief Check if any path segment begins with a dot character.
-     * @param file_path Filesystem path to evaluate.
-     * @returns True if any segment starts with a dot.
-     */
-    [[nodiscard]] bool contains_dotfile_segment(std::filesystem::path const &file_path)
-    {
-        for (auto const &path_element : file_path)
-        {
-            auto const element_string = path_element.string();
-            if (!element_string.empty() && element_string != "/" && element_string.front() == '.')
-                return true;
-        }
-        return false;
     }
 
     /**
@@ -196,22 +150,99 @@ namespace
     }
 
     /**
-     * @brief Default security and identification headers attached to HTTP responses.
+     * @brief Validate SSL files and create an httplib SSLServer instance.
+     * @param certificate_path Path to certificate file in PEM format.
+     * @param private_key_path Path to private key file in PEM format.
+     * @returns Unique pointer to configured httplib Server.
+     * @throws std::runtime_error If certificate verification fails.
      */
-    httplib::Headers const DEFAULT_HEADERS = {
-        {"Server", "SSS"},
-        {"X-Content-Type-Options", "nosniff"},
-        {"X-Frame-Options", "SAMEORIGIN"}
-    };
+    [[nodiscard]] std::unique_ptr<httplib::Server> create_ssl_server(std::filesystem::path const &certificate_path, std::filesystem::path const &private_key_path)
+    {
+        if (!std::filesystem::exists(certificate_path))
+            throw std::runtime_error("Certificate file does not exist: " + certificate_path.string());
+        if (!std::filesystem::is_regular_file(certificate_path))
+            throw std::runtime_error("Certificate path is not a regular file: " + certificate_path.string());
+        if (!std::filesystem::exists(private_key_path))
+            throw std::runtime_error("Private key file does not exist: " + private_key_path.string());
+        if (!std::filesystem::is_regular_file(private_key_path))
+            throw std::runtime_error("Private key path is not a regular file: " + private_key_path.string());
+
+        std::string configuration_error;
+        auto ssl_server = std::make_unique<httplib::SSLServer>(
+            [&](SSL_CTX &ssl_context)
+            {
+                ERR_clear_error();
+                if (SSL_CTX_use_certificate_chain_file(&ssl_context, certificate_path.c_str()) != SSL_SUCCESS)
+                {
+                    configuration_error = "Failed to load certificate file: " + certificate_path.string();
+                    ERR_clear_error();
+                    return false;
+                }
+
+                if (SSL_CTX_use_PrivateKey_file(&ssl_context, private_key_path.c_str(), SSL_FILETYPE_PEM) != SSL_SUCCESS)
+                {
+                    unsigned long const error_code = ERR_peek_last_error();
+                    if (ERR_GET_REASON(error_code) == X509_R_KEY_VALUES_MISMATCH)
+                        configuration_error = "Private key does not match certificate: " + private_key_path.string();
+                    else
+                        configuration_error = "Failed to load private key file: " + private_key_path.string();
+                    ERR_clear_error();
+                    return false;
+                }
+
+                if (SSL_CTX_check_private_key(&ssl_context) != SSL_SUCCESS)
+                {
+                    configuration_error = "Private key does not match certificate: " + private_key_path.string();
+                    ERR_clear_error();
+                    return false;
+                }
+
+                ERR_clear_error();
+                return true;
+            });
+
+        if (!configuration_error.empty())
+            throw std::runtime_error(configuration_error);
+
+        if (!ssl_server->is_valid())
+            throw std::runtime_error("SSL server initialization failed");
+
+        return ssl_server;
+    }
+
+    /**
+     * @brief Allocate a server instance based on certificate paths.
+     * @param certificate_path Path to certificate file.
+     * @param private_key_path Path to private key file.
+     * @returns Unique pointer to allocated httplib Server.
+     * @throws std::runtime_error If certificate configuration is mismatched.
+     */
+    [[nodiscard]] std::unique_ptr<httplib::Server> create_server_instance(std::filesystem::path const &certificate_path, std::filesystem::path const &private_key_path)
+    {
+        if (certificate_path.empty() != private_key_path.empty())
+            throw std::runtime_error("Both certificate_path and private_key_path must be provided for HTTPS");
+        else if (!certificate_path.empty() && !private_key_path.empty())
+            return create_ssl_server(certificate_path, private_key_path);
+        return std::make_unique<httplib::Server>();
+    }
+
+    /**
+     * @brief Generate default security and identification headers for HTTP responses.
+     * @param is_secure Flag indicating if connection is secured with TLS encryption.
+     * @returns Headers map containing security and identification key-value pairs.
+     */
+    [[nodiscard]] httplib::Headers create_default_headers(bool const is_secure)
+    {
+        httplib::Headers headers = {{"Server", "SSS"}, {"X-Content-Type-Options", "nosniff"}, {"X-Frame-Options", "SAMEORIGIN"}};
+        if (is_secure)
+            headers.emplace("Strict-Transport-Security", "max-age=3600; includeSubDomains");
+        return headers;
+    }
 } // namespace
 
 namespace sss::webserver
 {
-    Server::Server(std::filesystem::path const &root_directory,
-                   int const port,
-                   std::string const &host,
-                   std::filesystem::path const &certificate_path,
-                   std::filesystem::path const &private_key_path)
+    Server::Server(std::filesystem::path const &root_directory, int const port, std::string const &host, std::filesystem::path const &certificate_path, std::filesystem::path const &private_key_path)
         : m_server(create_server_instance(certificate_path, private_key_path)),
           m_worker_thread()
     {
@@ -219,11 +250,17 @@ namespace sss::webserver
         uint16_t const valid_port = validate_port(port);
         std::string const bind_host = normalize_bind_host(host);
 
-        this->m_server->set_socket_options([](auto const socket_descriptor)
+        this->m_server->new_task_queue = []()
         {
-            int const socket_option = ENABLE_SOCKET_OPTION;
-            setsockopt(socket_descriptor, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<void const *>(&socket_option), sizeof(socket_option));
-        });
+            return new httplib::ThreadPool(MAXIMUM_WORKER_THREADS);
+        };
+
+        this->m_server->set_socket_options(
+            [](auto const socket_descriptor)
+            {
+                int const socket_option = ENABLE_SOCKET_OPTION;
+                setsockopt(socket_descriptor, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<void const *>(&socket_option), sizeof(socket_option));
+            });
 
         this->m_server->set_read_timeout(READ_TIMEOUT_SECONDS, TIMEOUT_MICROSECONDS);
         this->m_server->set_write_timeout(WRITE_TIMEOUT_SECONDS, TIMEOUT_MICROSECONDS);
@@ -231,48 +268,48 @@ namespace sss::webserver
         for (auto const &[extension, mime_type] : get_system_mime_types())
             this->m_server->set_file_extension_and_mimetype_mapping(extension, mime_type);
 
-        this->m_server->set_pre_routing_handler([](httplib::Request const &request, httplib::Response &response)
-        {
-            for (auto const &[header_name, header_value] : DEFAULT_HEADERS)
-                response.set_header(header_name, header_value);
+        bool const is_secure = (!certificate_path.empty() && !private_key_path.empty());
+        httplib::Headers const default_headers = create_default_headers(is_secure);
 
-            if (contains_null_byte(request))
+        this->m_server->set_pre_routing_handler(
+            [default_headers](httplib::Request const &request, httplib::Response &response)
             {
-                response.status = httplib::StatusCode::BadRequest_400;
-                response.set_content("Bad Request", "text/plain");
-                return httplib::Server::HandlerResponse::Handled;
-            }
+                for (auto const &[header_name, header_value] : default_headers)
+                    response.set_header(header_name, header_value);
 
-            if (request.path.find("/..") != std::string::npos || request.path.find("../") != std::string::npos)
-            {
-                response.status = httplib::StatusCode::Forbidden_403;
-                response.set_content("Forbidden", "text/plain");
-                return httplib::Server::HandlerResponse::Handled;
-            }
+                if (contains_null_byte(request))
+                {
+                    response.status = httplib::StatusCode::BadRequest_400;
+                    response.set_content("Bad Request", "text/plain");
+                    return httplib::Server::HandlerResponse::Handled;
+                }
 
-            if (request.method != "GET" && request.method != "HEAD")
-            {
-                response.status = httplib::StatusCode::MethodNotAllowed_405;
-                response.set_header("Allow", "GET, HEAD");
-                response.set_content("Method Not Allowed", "text/plain");
-                return httplib::Server::HandlerResponse::Handled;
-            }
+                if (request.method != "GET" && request.method != "HEAD")
+                {
+                    response.status = httplib::StatusCode::MethodNotAllowed_405;
+                    response.set_header("Allow", "GET, HEAD");
+                    response.set_content("Method Not Allowed", "text/plain");
+                    return httplib::Server::HandlerResponse::Handled;
+                }
 
-            return httplib::Server::HandlerResponse::Unhandled;
-        });
+                if (contains_path_traversal(request.path) || contains_path_traversal(request.target))
+                {
+                    response.status = httplib::StatusCode::Forbidden_403;
+                    response.set_content("Forbidden", "text/plain");
+                    return httplib::Server::HandlerResponse::Handled;
+                }
 
-        this->m_server->set_mount_point("/", root_path, DEFAULT_HEADERS);
+                if (contains_dotfile_segment(request.path) || contains_dotfile_segment(request.target))
+                {
+                    response.status = httplib::StatusCode::Forbidden_403;
+                    response.set_content("Forbidden", "text/plain");
+                    return httplib::Server::HandlerResponse::Handled;
+                }
 
-        this->m_server->set_file_request_handler([](httplib::Request const &request, httplib::Response &response)
-        {
-            std::filesystem::path const file_path(request.path);
-            if (contains_dotfile_segment(file_path))
-            {
-                response.status = httplib::StatusCode::Forbidden_403;
-                response.set_content("Forbidden", "text/plain");
-                return;
-            }
-        });
+                return httplib::Server::HandlerResponse::Unhandled;
+            });
+
+        this->m_server->set_mount_point("/", root_path, default_headers);
 
         if (!this->m_server->bind_to_port(bind_host, valid_port))
             throw std::runtime_error("Failed to bind socket on " + bind_host + ":" + std::to_string(valid_port));
@@ -281,6 +318,17 @@ namespace sss::webserver
         {
             this->m_server->listen_after_bind();
         });
+
+        this->m_server->wait_until_ready();
+        if (!this->m_server->is_running())
+        {
+            if (this->m_worker_thread.joinable())
+            {
+                this->m_server->stop();
+                this->m_worker_thread.join();
+            }
+            throw std::runtime_error("Server failed to start listening on " + bind_host + ":" + std::to_string(valid_port));
+        }
     }
 
     Server::~Server()

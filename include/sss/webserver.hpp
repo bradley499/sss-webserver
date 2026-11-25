@@ -28,11 +28,7 @@ namespace sss::webserver
          * @throws std::invalid_argument If the port number is invalid.
          * @throws std::runtime_error If paths are invalid or socket binding fails.
          */
-        explicit Server(std::filesystem::path const &root_directory,
-                        int const port = 8080,
-                        std::string const &host = "127.0.0.1",
-                        std::filesystem::path const &certificate_path = {},
-                        std::filesystem::path const &private_key_path = {});
+        explicit Server(std::filesystem::path const &root_directory, int const port = 8080, std::string const &host = "127.0.0.1", std::filesystem::path const &certificate_path = {}, std::filesystem::path const &private_key_path = {});
 
         /**
          * @brief Destroy the Server instance and stop listener thread.

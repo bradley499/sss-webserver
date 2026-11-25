@@ -19,10 +19,11 @@ namespace sss::webserver
         {
             std::string result;
             result.reserve(text.size());
-            std::transform(text.begin(), text.end(), std::back_inserter(result), [](unsigned char const character)
-            {
-                return static_cast<char>(std::tolower(character));
-            });
+            std::transform(text.begin(), text.end(), std::back_inserter(result),
+                           [](unsigned char const character)
+                           {
+                               return static_cast<char>(std::tolower(character));
+                           });
             return result;
         }
 
@@ -66,14 +67,11 @@ namespace sss::webserver
             return mime_map;
         }
 
-        /**
-         * @brief Global system MIME registry loaded at program initialization.
-         */
-        std::unordered_map<std::string, std::string> const SYSTEM_MIME_TYPES = load_mime_file("/etc/mime.types");
     } // namespace
 
     std::unordered_map<std::string, std::string> const &get_system_mime_types()
     {
-        return SYSTEM_MIME_TYPES;
+        static std::unordered_map<std::string, std::string> const system_mime_types = load_mime_file("/etc/mime.types");
+        return system_mime_types;
     }
 } // namespace sss::webserver
