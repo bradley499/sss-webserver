@@ -5,10 +5,12 @@
 #include "sss/webserver.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 
 #include <httplib.h>
@@ -61,39 +63,92 @@ namespace
     constexpr size_t MAXIMUM_WORKER_THREADS = 8;
 
     /**
-     * @brief Check whether a request path attempts path traversal through parent directories.
-     * @param path_string Input path string to evaluate.
-     * @returns True if path traversal sequence exists.
+     * @brief Convert a hexadecimal ASCII character to its 4-bit integer value.
+     * @param character Input ASCII character.
+     * @returns Integer value 0-15, or -1 if character is not a valid hex digit.
      */
-    [[nodiscard]] bool contains_path_traversal(std::string const &path_string)
+    [[nodiscard]] constexpr int hex_digit_to_integer(char const character) noexcept
     {
-        std::string normalized_path = httplib::detail::decode_url(path_string, false);
-        std::replace(normalized_path.begin(), normalized_path.end(), '\\', '/');
-        std::filesystem::path const filesystem_path(normalized_path);
-        for (auto const &element : filesystem_path)
-            if (element.string() == "..")
+        if (character >= '0' && character <= '9')
+            return character - '0';
+        if (character >= 'a' && character <= 'f')
+            return character - 'a' + 10;
+        if (character >= 'A' && character <= 'F')
+            return character - 'A' + 10;
+        return -1;
+    }
+
+    /**
+     * @brief Decode percent-encoded hexadecimal characters from a URL string component.
+     * @param text Input encoded text view.
+     * @returns Decoded ASCII string.
+     */
+    [[nodiscard]] std::string decode_url_component(std::string_view const text)
+    {
+        std::string decoded_text;
+        decoded_text.reserve(text.size());
+        for (size_t index = 0; index < text.size(); ++index)
+        {
+            if (text[index] == '%' && index + 2 < text.size())
+            {
+                int const high_nibble = hex_digit_to_integer(text[index + 1]);
+                int const low_nibble = hex_digit_to_integer(text[index + 2]);
+                if (high_nibble != -1 && low_nibble != -1)
+                {
+                    decoded_text.push_back(static_cast<char>((high_nibble << 4) | low_nibble));
+                    index += 2;
+                    continue;
+                }
+            }
+            decoded_text.push_back(text[index]);
+        }
+        return decoded_text;
+    }
+
+    /**
+     * @brief Check whether a path contains directory traversal or hidden dotfile segments.
+     * @param path_view Input path view to evaluate.
+     * @returns True if path contains forbidden segments.
+     */
+    [[nodiscard]] bool has_forbidden_segment(std::string_view const path_view) noexcept
+    {
+        size_t segment_start = 0;
+        while (segment_start < path_view.size())
+        {
+            while (segment_start < path_view.size() && (path_view[segment_start] == '/' || path_view[segment_start] == '\\'))
+                ++segment_start;
+            if (segment_start >= path_view.size())
+                break;
+
+            size_t segment_end = segment_start;
+            while (segment_end < path_view.size() && path_view[segment_end] != '/' && path_view[segment_end] != '\\')
+                ++segment_end;
+
+            std::string_view const segment = path_view.substr(segment_start, segment_end - segment_start);
+            if (segment == ".." || (segment.front() == '.' && segment != "."))
                 return true;
-        if (normalized_path == ".." || normalized_path.rfind("../", 0) == 0 || normalized_path.find("/../") != std::string::npos || (normalized_path.length() >= 3 && normalized_path.rfind("/..") == normalized_path.length() - 3))
-            return true;
+
+            segment_start = segment_end;
+        }
         return false;
     }
 
     /**
-     * @brief Check if any path segment begins with a dot character.
+     * @brief Determine if a request path attempts path traversal or dotfile access.
      * @param path_string Input path string to evaluate.
-     * @returns True if any segment starts with a dot.
+     * @returns True if path contains insecure sequences.
      */
-    [[nodiscard]] bool contains_dotfile_segment(std::string const &path_string)
+    [[nodiscard]] bool is_insecure_path(std::string_view const path_string)
     {
-        std::string normalized_path = httplib::detail::decode_url(path_string, false);
-        std::replace(normalized_path.begin(), normalized_path.end(), '\\', '/');
-        std::filesystem::path const filesystem_path(normalized_path);
-        for (auto const &element : filesystem_path)
+        if (has_forbidden_segment(path_string))
+            return true;
+
+        if (path_string.find('%') != std::string_view::npos || path_string.find('\\') != std::string_view::npos)
         {
-            auto const element_string = element.string();
-            if (!element_string.empty() && element_string != "/" && element_string != "." && element_string != ".." && element_string.front() == '.')
-                return true;
+            std::string const decoded_path = decode_url_component(path_string);
+            return has_forbidden_segment(decoded_path);
         }
+
         return false;
     }
 
@@ -292,14 +347,7 @@ namespace sss::webserver
                     return httplib::Server::HandlerResponse::Handled;
                 }
 
-                if (contains_path_traversal(request.path) || contains_path_traversal(request.target))
-                {
-                    response.status = httplib::StatusCode::Forbidden_403;
-                    response.set_content("Forbidden", "text/plain");
-                    return httplib::Server::HandlerResponse::Handled;
-                }
-
-                if (contains_dotfile_segment(request.path) || contains_dotfile_segment(request.target))
+                if (is_insecure_path(request.path) || is_insecure_path(request.target))
                 {
                     response.status = httplib::StatusCode::Forbidden_403;
                     response.set_content("Forbidden", "text/plain");
@@ -314,10 +362,11 @@ namespace sss::webserver
         if (!this->m_server->bind_to_port(bind_host, valid_port))
             throw std::runtime_error("Failed to bind socket on " + bind_host + ":" + std::to_string(valid_port));
 
-        this->m_worker_thread = std::thread([this]()
-        {
-            this->m_server->listen_after_bind();
-        });
+        this->m_worker_thread = std::thread(
+            [this]()
+            {
+                this->m_server->listen_after_bind();
+            });
 
         this->m_server->wait_until_ready();
         if (!this->m_server->is_running())
